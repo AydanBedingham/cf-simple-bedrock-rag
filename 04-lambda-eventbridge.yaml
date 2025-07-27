@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for the S3 to Bedrock sync Lambda function and EventBridge scheduled rule
+
+Parameters:
+
+  EnvName:
+    Type: String
+    Description: Environment based resource name prefix
+    Default: dev
+
+  SyncIntervalMinutes:
+    Type: Number
+    Description: Frequency in minutes to run the sync Lambda function
+    Default: 180
+
+Resources:
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: BedrockSyncPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: bedrock:StartIngestionJob
+                Resource:
+                  Fn::ImportValue: !Sub '${EnvName}-rag-KnowledgeBaseArn'
+
+  SyncLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${EnvName}-rag-s3-bedrock-sync'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID:
+            Fn::ImportValue: !Sub '${EnvName}-rag-KnowledgeBaseId'
+          DATA_SOURCE_ID: 
+            Fn::ImportValue: !Sub '${EnvName}-rag-KnowledgeBaseDataSourceId'
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import logging
+          import json
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          bedrock_agent_runtime_client = boto3.client('bedrock-agent')
+
+          def lambda_handler(event, context):
+            print(f"event: {json.dumps(event)}")
+            
+            knowledge_base_id = os.environ['KNOWLEDGE_BASE_ID']
+            data_source_id = os.environ['DATA_SOURCE_ID']
+
+            try:
+                response = bedrock_agent_runtime_client.start_ingestion_job(
+                    knowledgeBaseId=knowledge_base_id,
+                    dataSourceId=data_source_id
+                )
+                ingestion_job = response['ingestionJob']
+                logger.info(f"Started ingestion job: {ingestion_job['ingestionJobId']}")
+                return {
+                    'statusCode': 200,
+                    'body': f"Successfully started ingestion job {ingestion_job['ingestionJobId']}"
+                }
+            except Exception as e:
+                logger.error(f"Error starting ingestion job: {e}")
+                raise e
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${EnvName}-rag-scheduled-sync-rule'
+      Description: !Sub 'Schedule to run sync Lambda every ${SyncIntervalMinutes} minutes'
+      ScheduleExpression: !Sub 'rate(${SyncIntervalMinutes} minutes)'
+      Targets:
+        - Arn: !GetAtt SyncLambda.Arn
+          Id: 'BedrockSyncLambdaTarget'
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SyncLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn

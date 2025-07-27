@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: CloudFormation template for the S3 data bucket
+
+Parameters:
+
+  EnvName:
+    Type: String
+    Description: Environment based resource name prefix
+    Default: dev
+
+Resources:
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${EnvName}-rag-kb-data'
+
+Outputs:
+
+  S3BucketArn:
+    Description: RAG Knowledge Base Data Bucket Arn
+    Value: !GetAtt S3Bucket.Arn
+    Export:
+      Name: !Sub '${EnvName}-rag-KbDataBucketArn'
+

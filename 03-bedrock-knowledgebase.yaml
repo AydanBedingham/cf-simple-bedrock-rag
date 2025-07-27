@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for Bedrock Knowledge Base using existing OpenSearch Serverless resources
+
+Parameters:
+
+  EnvName:
+    Type: String
+    Description: Environment based resource name prefix
+    Default: dev
+
+  EmbeddingModelArn:
+    Type: String
+    Description: ARN of the Bedrock embedding model
+    Default: arn:aws:bedrock:ap-southeast-2::foundation-model/amazon.titan-embed-text-v2:0
+
+Resources:
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub '${EnvName}-rag-knowledge-base'
+      Description: Knowledge Base for RAG
+      RoleArn: !GetAtt BedrockExecutionRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Ref EmbeddingModelArn
+      StorageConfiguration:
+        Type: OPENSEARCH_SERVERLESS
+        OpensearchServerlessConfiguration:
+          CollectionArn: 
+            Fn::ImportValue: !Sub '${EnvName}-rag-OpenSearchCollectionArn'
+          VectorIndexName: 
+            Fn::ImportValue: !Sub '${EnvName}-rag-VectorIndexName'
+          FieldMapping:
+            VectorField: bedrock-knowledge-base-default-vector
+            TextField:
+              Fn::ImportValue: !Sub '${EnvName}-rag-TextChunkFieldName'
+            MetadataField:
+              Fn::ImportValue: !Sub '${EnvName}-rag-MetadataFieldName'
+
+  DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      Name: !Sub '${EnvName}-rag-s3-data-source'
+      KnowledgeBaseId: !Ref KnowledgeBase
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: 
+            Fn::ImportValue: !Sub '${EnvName}-rag-KbDataBucketArn'
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: 300
+            OverlapPercentage: 20
+
+  BedrockExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: BedrockKnowledgeBasePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only access to bucket and objects
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - Fn::ImportValue: !Sub '${EnvName}-rag-KbDataBucketArn'
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource:
+                  - Fn::Sub:
+                      - '${BucketArn}/*'
+                      - BucketArn: !ImportValue
+                          'Fn::Sub': '${EnvName}-rag-KbDataBucketArn'
+              # OpenSearch Serverless access (limit to collection ARN if possible)
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource:
+                  - Fn::ImportValue: !Sub '${EnvName}-rag-OpenSearchCollectionArn'
+              # Bedrock model invocation
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Ref EmbeddingModelArn
+
+Outputs:
+
+  KnowledgeBaseArn:
+    Description: RAG Bedrock Knowledge Base Arn
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseArn
+    Export:
+      Name: !Sub '${EnvName}-rag-KnowledgeBaseArn'
+
+  KnowledgeBaseId:
+    Description: RAG Bedrock Knowledge Base Identifier
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseId
+    Export:
+      Name: !Sub '${EnvName}-rag-KnowledgeBaseId'
+
+  DataSourceId:
+    Description: RAG Bedrock Knowledge Base Data Source Identifier
+    Value: !GetAtt DataSource.DataSourceId
+    Export:
+      Name: !Sub '${EnvName}-rag-KnowledgeBaseDataSourceId'

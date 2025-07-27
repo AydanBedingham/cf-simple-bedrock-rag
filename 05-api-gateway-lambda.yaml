@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for API Gateway and Lambda to query Bedrock Knowledge Base
+
+Parameters:
+  EnvName:
+    Type: String
+    Description: Environment prefix used in cross-stack exports (e.g., dev, prod)
+    Default: dev
+
+  ModelId:
+    Type: String
+    Description: Bedrock model ID to use for text generation
+    Default: amazon.titan-text-lite-v1
+    AllowedValues:
+      - amazon.titan-text-lite-v1
+
+Resources:
+
+  QueryLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaBedrockExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - bedrock:*
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: '${EnvName}-rag-KnowledgeBaseArn'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/${ModelId}'
+
+  QueryLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-query-lambda'
+      Handler: index.lambda_handler
+      Role: !GetAtt QueryLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !ImportValue 
+            Fn::Sub: '${EnvName}-rag-KnowledgeBaseId'
+          NUMBER_OF_RESULTS: '5'
+          TEMPERATURE: '0'
+          MAX_TOKEN_COUNT: '1024'
+          MODEL_ID: !Ref ModelId
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from botocore.config import Config
+
+          MODEL_ID = os.environ.get('MODEL_ID', 'amazon.titan-text-lite-v1')
+          NUMBER_OF_RESULTS = int(os.environ.get('NUMBER_OF_RESULTS', 4))
+          TEMPERATURE = float(os.environ.get('TEMPERATURE', 0))
+          MAX_TOKEN_COUNT = int(os.environ.get('MAX_TOKEN_COUNT', 1024))
+
+          def retrieve_and_generate(bedrock_agent_client, bedrock_client, query, knowledge_base_id):
+              results = bedrock_agent_client.retrieve(
+                  knowledgeBaseId=knowledge_base_id,
+                  retrievalQuery={"text": query},
+                  retrievalConfiguration={
+                      "vectorSearchConfiguration": {"numberOfResults": NUMBER_OF_RESULTS}
+                  },
+              )
+
+              context = "\n\n".join(
+                  [item.get("content", {}).get("text", "")
+                   for item in results.get("retrievalResults", [])]
+              )
+              context = context or "No relevant context found."
+
+              prompt = f"Answer the question based only on the following context:\n{context}\n\nQuestion: {query}\n"
+
+              body = json.dumps({
+                  "inputText": prompt,
+                  "textGenerationConfig": {
+                      "temperature": TEMPERATURE,
+                      "maxTokenCount": MAX_TOKEN_COUNT
+                  }
+              })
+
+              resp = bedrock_client.invoke_model(
+                  modelId=MODEL_ID,
+                  body=body,
+                  accept="application/json",
+                  contentType="application/json",
+              )
+
+              response_payload = json.loads(resp["body"].read())
+              return response_payload["results"][0]["outputText"]
+
+          def lambda_handler(event, context):
+              print(f"event: {json.dumps(event)}")
+
+              body = json.loads(event.get('body', '{}'))
+              query = body.get('query')
+              kb_id = os.environ.get('KNOWLEDGE_BASE_ID')
+
+              if not query:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Query not provided'})
+                  }
+
+              bedrock_config = Config(connect_timeout=120, read_timeout=120, retries={'max_attempts': 0})
+
+              bedrock_agent_client = boto3.client('bedrock-agent-runtime', config=bedrock_config)
+              bedrock_client = boto3.client('bedrock-runtime', config=bedrock_config)
+
+              try:
+                  response = retrieve_and_generate(bedrock_agent_client, bedrock_client, query, kb_id)
+
+                  return {
+                      'statusCode': 200,
+                      'headers': { 'Content-Type': 'application/json' },
+                      'body': json.dumps({'output': response})
+                  }
+
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      Description: API for querying Bedrock Knowledge Base
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      RestApiId: !Ref ApiGateway
+      PathPart: query
+
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: POST
+      ResourceId: !Ref ApiGatewayResource
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryLambda.Arn}/invocations'
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ApiGatewayMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiGatewayDeployment
+
+  LambdaApiGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt QueryLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+Outputs:
+
+  ApiEndpoint:
+    Description: RAG Knowledge Base Query Invocation Endpoint Url
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/query'

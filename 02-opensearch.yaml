@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for OpenSearch Serverless resources for Bedrock Knowledge Base
+
+Parameters:
+
+  EnvName:
+    Type: String
+    Description: Environment based resource name prefix
+    Default: dev
+
+  VectorIndexCompatibility:
+    Type: String
+    Description: Ensures the Vector Index Config uses values compatible with a given embedding model
+    Default: AmazonTitanEmbedTextV2
+    AllowedValues:
+      - AmazonTitanEmbedTextV2
+
+Mappings:
+
+  VectorIndexConfig:
+    AmazonTitanEmbedTextV2:
+      Dimension: 1024
+      Engine: faiss
+      MethodName: hnsw
+      SpaceType: l2
+      M: 16
+      EfConstruction: 512
+
+Resources:
+
+  DataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub '${EnvName}-rag-opensearch-data-pol'
+      Type: data
+      Description: Access policy for quickstart collection
+      Policy: !Sub >
+        [ {
+            "Description": "Access for all IAM users in the account",
+            "Rules": [
+              {
+                "ResourceType": "index",
+                "Resource": ["index/*/*"],
+                "Permission": ["aoss:*"]
+              },
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${EnvName}-rag-opensearch-collection"],
+                "Permission": ["aoss:*"]
+              }
+            ],
+            "Principal": ["arn:aws:iam::${AWS::AccountId}:root"]
+          } ]
+
+  NetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub '${EnvName}-rag-opensearch-network-pol'
+      Type: network
+      Description: Network policy for quickstart collection
+      Policy: !Sub >
+        [ {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/${EnvName}-rag-opensearch-collection"]
+              },
+              {
+                "ResourceType": "dashboard",
+                "Resource": ["collection/${EnvName}-rag-opensearch-collection"]
+              }
+            ],
+            "AllowFromPublic": false
+          } ]
+
+  EncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub '${EnvName}-rag-opensearch-sec-pol'
+      Type: encryption
+      Description: Encryption policy for quickstart collection
+      Policy: !Sub >
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/${EnvName}-rag-opensearch-collection"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  Collection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: !Sub '${EnvName}-rag-opensearch-collection'
+      Type: VECTORSEARCH
+      Description: Collection to hold timeseries data
+    DependsOn: EncryptionPolicy
+
+  VectorIndex:
+    Type: AWS::OpenSearchServerless::Index
+    DependsOn:
+      - Collection
+      - DataAccessPolicy
+      - NetworkPolicy
+      - EncryptionPolicy
+    Properties:
+      CollectionEndpoint: !GetAtt Collection.CollectionEndpoint
+      IndexName: bedrock-knowledge-base-default-index
+      Mappings:
+        Properties:
+          bedrock-knowledge-base-default-vector:
+            Type: knn_vector
+            Dimension: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, Dimension]
+            Method:
+              Engine: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, Engine]
+              Name: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, MethodName]
+              SpaceType: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, SpaceType]
+              Parameters:
+                M: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, M]
+                EfConstruction: !FindInMap [VectorIndexConfig, !Ref VectorIndexCompatibility, EfConstruction]
+          AMAZON_BEDROCK_METADATA:
+            Type: text
+            Index: false
+          AMAZON_BEDROCK_TEXT_CHUNK:
+            Type: text
+            Index: true
+      Settings:
+        Index:
+          Knn: true
+
+Outputs:
+
+  CollectionArn:
+    Description: RAG OpenSearch Collection ARN
+    Value: !GetAtt Collection.Arn
+    Export:
+      Name: !Sub '${EnvName}-rag-OpenSearchCollectionArn'
+
+  VectorIndexName:
+    Description: RAG OpenSearch Vector Index Name
+    Value: bedrock-knowledge-base-default-index
+    Export:
+      Name: !Sub '${EnvName}-rag-VectorIndexName'
+
+  MetadataFieldName:
+    Description: RAG OpenSearch Metadata Field Name
+    Value: AMAZON_BEDROCK_METADATA
+    Export:
+      Name: !Sub '${EnvName}-rag-MetadataFieldName'
+
+  TextChunkFieldName:
+    Description: RAG OpenSearch Text Chunk Field Name
+    Value: AMAZON_BEDROCK_TEXT_CHUNK
+    Export:
+      Name: !Sub '${EnvName}-rag-TextChunkFieldName'
