@@ -52,7 +52,7 @@ Resources:
   QueryLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
-      FunctionName: !Sub '${AWS::StackName}-query-lambda'
+      FunctionName: !Sub '${EnvName}-rag-query-lambda'
       Handler: index.lambda_handler
       Role: !GetAtt QueryLambdaRole.Arn
       Runtime: python3.12
@@ -148,7 +148,7 @@ Resources:
   ApiGateway:
     Type: AWS::ApiGateway::RestApi
     Properties:
-      Name: !Sub '${AWS::StackName}-api'
+      Name: !Sub '${EnvName}-rag-api'
       Description: API for querying Bedrock Knowledge Base
 
   ApiGatewayResource:
