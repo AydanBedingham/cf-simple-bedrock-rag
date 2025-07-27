@@ -1,4 +1,4 @@
-# AWS Bedrock RAG Project
+# cf-simple-bedrock-rag
 
 This project implements a basic Retrieval-Augmented Generation (RAG) solution using AWS Bedrock, S3, OpenSearch Serverless, Lambda, API Gateway, and EventBridge. The infrastructure is defined using AWS CloudFormation.
 
