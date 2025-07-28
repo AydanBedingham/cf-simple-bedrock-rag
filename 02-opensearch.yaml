@@ -70,7 +70,7 @@ Resources:
                 "Resource": ["collection/${EnvName}-rag-opensearch-collection"]
               }
             ],
-            "AllowFromPublic": false
+            "AllowFromPublic": true
           } ]
 
   EncryptionPolicy:
