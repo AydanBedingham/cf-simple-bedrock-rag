@@ -4,7 +4,7 @@ Description: CloudFormation template for API Gateway and Lambda to query Bedrock
 Parameters:
   EnvName:
     Type: String
-    Description: Environment prefix used in cross-stack exports (e.g., dev, prod)
+    Description: Environment based resource name prefix
     Default: dev
 
   ModelId:
